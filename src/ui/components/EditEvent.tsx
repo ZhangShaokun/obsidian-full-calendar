@@ -160,6 +160,12 @@ export const EditEvent = ({
         }
     }, [titleRef]);
 
+    // Only calendars backed by the vault can be written to. Keep the original
+    // index around, since that's what gets handed back to submit().
+    const selectableCalendars = calendars
+        .map((cal, index) => ({ cal, index }))
+        .filter(({ cal }) => cal.type === "local" || cal.type === "dailynote");
+
     const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
         e.preventDefault();
         await submit(
@@ -223,29 +229,21 @@ export const EditEvent = ({
                             parseInt
                         )}
                     >
-                        {calendars
-                            .flatMap((cal) =>
-                                cal.type === "local" || cal.type === "dailynote"
-                                    ? [cal]
-                                    : []
-                            )
-                            .map((cal, idx) => (
-                                <option
-                                    key={idx}
-                                    value={idx}
-                                    disabled={
-                                        !(
-                                            initialEvent?.title === undefined ||
-                                            calendars[calendarIndex].type ===
-                                                cal.type
-                                        )
-                                    }
-                                >
-                                    {cal.type === "local"
-                                        ? cal.name
-                                        : "Daily Note"}
-                                </option>
-                            ))}
+                        {selectableCalendars.map(({ cal, index }) => (
+                            <option
+                                key={index}
+                                value={index}
+                                disabled={
+                                    !(
+                                        initialEvent?.title === undefined ||
+                                        calendars[calendarIndex].type ===
+                                            cal.type
+                                    )
+                                }
+                            >
+                                {cal.name}
+                            </option>
+                        ))}
                     </select>
                 </p>
                 <p>

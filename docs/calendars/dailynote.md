@@ -15,10 +15,12 @@ You must be using one of the supported daily notes plugins in order to create a 
 
 Add a new calendar with the "Daily note" type, and select which heading from your daily note template that events should be placed under.
 
+You can add more than one daily note calendar -- one per heading -- so that to-dos under several different headings all show up on your calendar. Each daily note calendar has its own color, so events from different headings are easy to tell apart.
+
 If your template does not have any headings, then you can enter free-form text to specify the heading that events will be placed under.
 
 If a heading does not exist in a daily note, it will be appended to the end of the file before adding any events to it.
 
-Note that only one daily note calendar can be active at a time.
+Note that each heading can only be used by one calendar at a time.
 
 ![](../assets/dailynote.gif)

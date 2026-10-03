@@ -466,6 +466,7 @@ export default class EventCache {
 
         const idsToRemove: string[] = [];
         const eventsToAdd: CacheEntry[] = [];
+        let anyCalendarChanged = false;
 
         for (const calendar of calendars) {
             const oldEvents = this.store.getEventsInFileAndCalendar(
@@ -488,12 +489,16 @@ export default class EventCache {
             );
 
             // If no events have changed from what's in the cache, then there's no need to update the event store.
+            // A single file can be claimed by more than one calendar (e.g. multiple daily note
+            // calendars reading the same daily note), so skip this calendar and keep going.
             if (!eventsHaveChanged) {
                 console.debug(
-                    "events have not changed, do not update store or view."
+                    "events have not changed, do not update store or view.",
+                    calendar.id
                 );
-                return;
+                continue;
             }
+            anyCalendarChanged = true;
             console.debug(
                 "events have changed, updating store and views...",
                 oldEvents,
@@ -523,6 +528,12 @@ export default class EventCache {
 
             idsToRemove.push(...oldIds);
             eventsToAdd.push(...newEventsWithIds);
+        }
+
+        // Don't notify views when every calendar reported the same events it already had.
+        if (!anyCalendarChanged) {
+            console.debug("no calendar reported changes for file", file.path);
+            return;
         }
 
         this.updateViews(idsToRemove, eventsToAdd);

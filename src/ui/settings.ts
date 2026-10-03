@@ -108,6 +108,11 @@ export function addCalendarButton(
                                       )
                                       .filter((s): s is string => !!s)
                     )();
+                    // A daily note calendar is one-per-heading, so don't offer
+                    // headings that are already configured.
+                    const usedHeadings = plugin.settings.calendarSources
+                        .map((s) => (s.type === "dailynote" ? s.heading : null))
+                        .filter((s): s is string => !!s);
                     let headings: string[] = [];
                     let { template } = getDailyNoteSettings();
 
@@ -131,7 +136,9 @@ export function addCalendarButton(
                         directories: directories.filter(
                             (dir) => usedDirectories.indexOf(dir) === -1
                         ),
-                        headings,
+                        headings: headings.filter(
+                            (heading) => usedHeadings.indexOf(heading) === -1
+                        ),
                         submit: async (source: CalendarInfo) => {
                             if (source.type === "caldav") {
                                 try {

@@ -160,6 +160,32 @@ type CalendarSettingState = {
     sources: CalendarInfo[];
     dirty: boolean;
 };
+
+/**
+ * Multiple daily note calendars are supported, one per heading. Two calendars
+ * pointing at the same heading would collapse into the same calendar ID,
+ * so find any headings that are used more than once.
+ */
+export function findDuplicateHeadings(
+    sources: ReadonlyArray<{
+        type?: CalendarInfo["type"];
+        heading?: string;
+    }>
+): string[] {
+    const seen = new Set<string>();
+    const duplicates = new Set<string>();
+    for (const source of sources) {
+        if (source.type !== "dailynote" || !source.heading) {
+            continue;
+        }
+        if (seen.has(source.heading)) {
+            duplicates.add(source.heading);
+        }
+        seen.add(source.heading);
+    }
+    return [...duplicates];
+}
+
 export class CalendarSettings extends React.Component<
     CalendarSettingProps,
     CalendarSettingState
@@ -208,13 +234,14 @@ export class CalendarSettings extends React.Component<
                     {this.state.dirty && (
                         <button
                             onClick={() => {
-                                if (
-                                    this.state.sources.filter(
-                                        (s) => s.type === "dailynote"
-                                    ).length > 1
-                                ) {
+                                const duplicates = findDuplicateHeadings(
+                                    this.state.sources
+                                );
+                                if (duplicates.length > 0) {
                                     new Notice(
-                                        "Only one daily note calendar is allowed."
+                                        `Only one daily note calendar is allowed per heading: ${duplicates.join(
+                                            ", "
+                                        )}`
                                     );
                                     return;
                                 }

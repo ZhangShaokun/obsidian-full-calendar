@@ -203,6 +203,27 @@ const modifyListItem = (line: string, data: OFCEvent): string | null => {
     return makeListItem(data, listMatch[1]);
 };
 
+const isBlank = (line: string | undefined): boolean =>
+    line !== undefined && line.trim() === "";
+
+/**
+ * Splice lines into place, keeping exactly one blank line between the new
+ * content and whatever came before it. Returns the line number of the first
+ * inserted line.
+ */
+const insertWithBlankLine = (
+    lines: string[],
+    index: number,
+    newLines: string[]
+): number => {
+    if (index > 0 && !isBlank(lines[index - 1])) {
+        lines.splice(index, 0, "", ...newLines);
+        return index + 1;
+    }
+    lines.splice(index, 0, ...newLines);
+    return index;
+};
+
 /**
  * Add a list item to a given heading.
  * If the heading is undefined, then append the heading to the end of the file.
@@ -217,19 +238,33 @@ const addToHeading = (
     page: string,
     { heading, item, headingText }: AddToHeadingProps
 ): { page: string; lineNumber: number } => {
-    let lines = page.split("\n");
+    const lines = page.split("\n");
 
     const listItem = makeListItem(item);
+
+    let headingLine: number;
     if (heading) {
-        const headingLine = heading.position.start.line;
-        const lineNumber = headingLine + 1;
-        lines.splice(lineNumber, 0, listItem);
-        return { page: lines.join("\n"), lineNumber };
+        headingLine = heading.position.start.line;
     } else {
-        lines.push(`## ${headingText}`);
-        lines.push(listItem);
-        return { page: lines.join("\n"), lineNumber: lines.length - 1 };
+        headingLine = insertWithBlankLine(lines, lines.length, [
+            `## ${headingText}`,
+        ]);
     }
+
+    // New items go at the top of the list under the heading. The heading and
+    // its first item are always separated by a single blank line.
+    let blankLinesUnderHeading = 0;
+    while (isBlank(lines[headingLine + 1 + blankLinesUnderHeading])) {
+        blankLinesUnderHeading += 1;
+    }
+    if (blankLinesUnderHeading > 1) {
+        lines.splice(headingLine + 1, blankLinesUnderHeading - 1);
+    }
+
+    const index = headingLine + 1 + Math.min(blankLinesUnderHeading, 1);
+    const lineNumber = insertWithBlankLine(lines, index, [listItem]);
+
+    return { page: lines.join("\n"), lineNumber };
 };
 
 export default class DailyNoteCalendar extends EditableCalendar {
@@ -303,14 +338,11 @@ export default class DailyNoteCalendar extends EditableCalendar {
         }
         const metadata = await this.app.waitForMetadata(file);
 
+        // If the heading isn't in the note yet, addToHeading() appends it
+        // (along with the event) to the end of the file.
         const headingInfo = metadata.headings?.find(
             (h) => h.heading == this.heading
         );
-        if (!headingInfo) {
-            throw new Error(
-                `Could not find heading ${this.heading} in daily note ${file.path}.`
-            );
-        }
         let lineNumber = await this.app.rewrite(file, (contents) => {
             const { page, lineNumber } = addToHeading(contents, {
                 heading: headingInfo,
@@ -381,18 +413,12 @@ export default class DailyNoteCalendar extends EditableCalendar {
             }
             await this.app.read(newFile);
 
-            const metadata = this.app.getMetadata(newFile);
-            if (!metadata) {
-                throw new Error("No metadata for file " + file.path);
-            }
+            const metadata = await this.app.waitForMetadata(newFile);
+            // If the heading isn't in the target note yet, addToHeading()
+            // appends it along with the event.
             const headingInfo = metadata.headings?.find(
                 (h) => h.heading == this.heading
             );
-            if (!headingInfo) {
-                throw new Error(
-                    `Could not find heading ${this.heading} in daily note ${file.path}.`
-                );
-            }
 
             await this.app.rewrite(file, async (oldFileContents) => {
                 // Open the old file and remove the event.

@@ -674,5 +674,131 @@ describe("editable calendars", () => {
         it.todo("updates when events are the same but locations are different");
     });
 
+    // Multiple daily note calendars all read the same daily note file, so the
+    // cache has to handle several calendars claiming one file.
+    describe("multiple calendars reading the same file", () => {
+        const makeMultiCache = (
+            specs: {
+                id: string;
+                color: string;
+                events: EditableEventResponse[];
+            }[]
+        ) => {
+            const cache = new EventCache(
+                initializerMap((info) => {
+                    if (info.type !== "FOR_TEST_ONLY") {
+                        return null;
+                    }
+                    const spec = specs.find((s) => s.id === info.id);
+                    if (!spec) {
+                        return null;
+                    }
+                    return new TestEditable(info.color, info.id, spec.events);
+                })
+            );
+            cache.reset(
+                specs.map(({ id, color }) => ({
+                    type: "FOR_TEST_ONLY" as const,
+                    id,
+                    color,
+                    events: [],
+                }))
+            );
+            return cache;
+        };
+
+        const getTestCalendar = (cache: EventCache, id: string) => {
+            const calendar = cache.getCalendarById(getId(id));
+            expect(calendar).toBeInstanceOf(TestEditable);
+            return calendar as TestEditable;
+        };
+
+        const eventsInCalendar = (cache: EventCache, id: string) => {
+            const source = cache.getAllEvents().find((s) => s.id === getId(id));
+            expect(source).toBeDefined();
+            return extractEvents(source as OFCEventSource);
+        };
+
+        it("gives each calendar its own ID and color", async () => {
+            const first = mockEventResponse();
+            const second = mockEventResponse();
+            const cache = makeMultiCache([
+                { id: "heading-a", color: "red", events: [first] },
+                { id: "heading-b", color: "blue", events: [second] },
+            ]);
+
+            await cache.populate();
+
+            const sources = cache.getAllEvents();
+            expect(sources.length).toBe(2);
+            expect(sources.map((s) => s.id).sort()).toEqual([
+                getId("heading-a"),
+                getId("heading-b"),
+            ]);
+            expect(eventsInCalendar(cache, "heading-a")).toEqual([first[0]]);
+            expect(eventsInCalendar(cache, "heading-b")).toEqual([second[0]]);
+            expect(
+                sources.find((s) => s.id === getId("heading-a"))?.color
+            ).toEqual("red");
+            expect(
+                sources.find((s) => s.id === getId("heading-b"))?.color
+            ).toEqual("blue");
+        });
+
+        it("updates every calendar in a file, even if an earlier one is unchanged", async () => {
+            const file = { path: "daily/2026-10-02.md" } as TFile;
+            const unchangedEvent: EditableEventResponse = [
+                mockEvent(),
+                { file, lineNumber: 1 },
+            ];
+            const existingEvent: EditableEventResponse = [
+                mockEvent(),
+                { file, lineNumber: 2 },
+            ];
+            const addedEvent: EditableEventResponse = [
+                mockEvent(),
+                { file, lineNumber: 3 },
+            ];
+
+            const cache = makeMultiCache([
+                { id: "heading-a", color: "red", events: [unchangedEvent] },
+                { id: "heading-b", color: "blue", events: [existingEvent] },
+            ]);
+
+            await cache.populate();
+
+            assertCacheContentCounts(cache, {
+                calendars: 2,
+                files: 1,
+                events: 2,
+            });
+
+            // Only the second calendar reports a change. The first one must not
+            // short-circuit the loop over calendars.
+            getTestCalendar(cache, "heading-a").getEventsInFile.mockReturnValue(
+                new Promise((resolve) => resolve([unchangedEvent]))
+            );
+            getTestCalendar(cache, "heading-b").getEventsInFile.mockReturnValue(
+                new Promise((resolve) => resolve([existingEvent, addedEvent]))
+            );
+
+            await cache.fileUpdated(file);
+
+            assertCacheContentCounts(cache, {
+                calendars: 2,
+                files: 1,
+                events: 3,
+            });
+
+            expect(eventsInCalendar(cache, "heading-a")).toEqual([
+                unchangedEvent[0],
+            ]);
+            expect(eventsInCalendar(cache, "heading-b")).toEqual([
+                existingEvent[0],
+                addedEvent[0],
+            ]);
+        });
+    });
+
     describe("make sure cache is populated before doing anything", () => {});
 });
