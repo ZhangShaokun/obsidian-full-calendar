@@ -80,3 +80,32 @@
 	border-color: black !important;
 	border-width: 1px !important;
 }
+
+/* Time grid layout. The variables below are set on the calendar container from
+   the plugin settings (see setLayoutVars() in calendar.ts), so the fallbacks
+   are only used when the calendar is rendered without them. */
+
+/* Rows fill the available height, but never get shorter than the configured
+   minimum. When they can't fit, FullCalendar scrolls the time grid. */
+.fc .fc-timegrid-slot {
+	min-height: var(--ofc-slot-min-height, 22px);
+}
+
+/* The all-day row is sized to the busiest day of the visible range. */
+.fc-timegrid .fc-daygrid-day-frame {
+	min-height: var(--ofc-allday-height, var(--ofc-allday-min-height, 36px));
+}
+
+/* Once it reaches its maximum height it scrolls instead of pushing the time
+   grid off screen. */
+.fc-timegrid .fc-daygrid-day-events {
+	max-height: var(--ofc-allday-max-height, 140px);
+	overflow-y: auto;
+}
+
+/* Working hours are drawn as background events. They must never swallow
+   clicks, drags or selections meant for the grid itself. */
+.ofc-work-hours,
+.ofc-non-work-hours {
+	pointer-events: none;
+}

@@ -209,4 +209,26 @@ export default class FullCalendarPlugin extends Plugin {
         await this.cache.populate();
         this.cache.resync();
     }
+
+    /**
+     * Persist settings that only change how the calendar is drawn. The event
+     * cache is left alone, but open views are rebuilt so that options which
+     * FullCalendar only reads on creation take effect right away.
+     */
+    async saveViewSettings() {
+        await this.saveData(this.settings);
+        await this.refreshCalendarViews();
+    }
+
+    async refreshCalendarViews() {
+        const leaves = [
+            ...this.app.workspace.getLeavesOfType(FULL_CALENDAR_VIEW_TYPE),
+            ...this.app.workspace.getLeavesOfType(
+                FULL_CALENDAR_SIDEBAR_VIEW_TYPE
+            ),
+        ];
+        await Promise.all(
+            leaves.map((leaf) => (leaf.view as CalendarView).onOpen())
+        );
+    }
 }

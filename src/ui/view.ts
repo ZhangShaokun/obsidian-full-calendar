@@ -1,7 +1,12 @@
 import "./overrides.css";
 import { ItemView, Menu, Notice, WorkspaceLeaf } from "obsidian";
 import { Calendar, EventSourceInput } from "@fullcalendar/core";
-import { renderCalendar } from "./calendar";
+import {
+    applyAllDayHeight,
+    applyWorkHours,
+    LayoutSettings,
+    renderCalendar,
+} from "./calendar";
 import FullCalendarPlugin from "../main";
 import { FCError, PLUGIN_SLUG } from "../types";
 import {
@@ -17,6 +22,20 @@ import { UpdateViewCallback } from "src/core/EventCache";
 
 export const FULL_CALENDAR_VIEW_TYPE = "full-calendar-view";
 export const FULL_CALENDAR_SIDEBAR_VIEW_TYPE = "full-calendar-sidebar-view";
+
+/**
+ * Height the calendar can actually use. clientHeight includes the element's
+ * padding, so a calendar sized to it would stick out of the view and hide the
+ * end of the day behind a scrollbar.
+ */
+function availableHeight(container: HTMLElement): number {
+    const style = window.getComputedStyle(container);
+    const padding =
+        (parseFloat(style.paddingTop) || 0) +
+        (parseFloat(style.paddingBottom) || 0);
+    // Leave room for the horizontal scrollbar FullCalendar puts under the grid.
+    return Math.max(0, container.clientHeight - padding - 1);
+}
 
 function getCalendarColors(color: string | null | undefined): {
     color: string;
@@ -54,6 +73,7 @@ export class CalendarView extends ItemView {
     plugin: FullCalendarPlugin;
     inSidebar: boolean;
     fullCalendarView: Calendar | null = null;
+    calendarEl: HTMLElement | null = null;
     callback: UpdateViewCallback | null = null;
 
     constructor(
@@ -103,9 +123,12 @@ export class CalendarView extends ItemView {
             await this.plugin.cache.populate();
         }
 
-        const container = this.containerEl.children[1];
+        const container = this.containerEl.children[1] as HTMLElement;
         container.empty();
         let calendarEl = container.createEl("div");
+        this.calendarEl = calendarEl;
+        // FullCalendar only scrolls the time grid when it knows how tall it is.
+        const height = availableHeight(container);
 
         if (
             this.plugin.settings.calendarSources.filter(
@@ -210,6 +233,8 @@ export class CalendarView extends ItemView {
             firstDay: this.plugin.settings.firstDay,
             initialView: this.plugin.settings.initialView,
             timeFormat24h: this.plugin.settings.timeFormat24h,
+            layout: this.layoutSettings(),
+            height: height > 0 ? height : undefined,
             openContextMenuForEvent: async (e, mouseEvent) => {
                 const menu = new Menu();
                 if (!this.plugin.cache) {
@@ -313,6 +338,8 @@ export class CalendarView extends ItemView {
                 sources.forEach((source) =>
                     this.fullCalendarView?.addEventSource(source)
                 );
+                // removeAllEventSources() drops the working hours too.
+                this.refreshLayout();
                 return;
             } else if (payload.type === "events") {
                 const { toRemove, toAdd } = payload;
@@ -345,6 +372,8 @@ export class CalendarView extends ItemView {
                     );
                     console.debug("event that was added", addedEvent);
                 });
+                // The all-day area is sized to the to-dos it holds.
+                this.refreshLayout();
             } else if (payload.type == "calendar") {
                 const {
                     calendar: { id, events, editable, color },
@@ -363,10 +392,40 @@ export class CalendarView extends ItemView {
         });
     }
 
-    onResize(): void {
-        if (this.fullCalendarView) {
-            this.fullCalendarView.render();
+    private layoutSettings(): LayoutSettings {
+        const settings = this.plugin.settings;
+        return {
+            dayStartTime: settings.dayStartTime,
+            dayEndTime: settings.dayEndTime,
+            allDayMinHeight: settings.allDayMinHeight,
+            allDayMaxHeight: settings.allDayMaxHeight,
+            slotMinRowHeight: settings.slotMinRowHeight,
+            workHours: settings.workHours,
+            workHoursColor: settings.workHoursColor,
+            nonWorkHoursColor: settings.nonWorkHoursColor,
+        };
+    }
+
+    private refreshLayout() {
+        const root = this.calendarEl;
+        if (!this.fullCalendarView || !root) {
+            return;
         }
+        const layout = this.layoutSettings();
+        applyWorkHours(this.fullCalendarView, layout);
+        applyAllDayHeight(this.fullCalendarView, root, layout);
+    }
+
+    onResize(): void {
+        if (!this.fullCalendarView) {
+            return;
+        }
+        const container = this.containerEl.children[1] as HTMLElement;
+        const height = availableHeight(container);
+        if (height > 0) {
+            this.fullCalendarView.setOption("height", height);
+        }
+        this.refreshLayout();
     }
 
     async onunload() {
