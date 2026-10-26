@@ -45,8 +45,14 @@ export abstract class EditableCalendar extends Calendar {
     /**
      * Delete an event from the calendar.
      * @param location Location of event to delete.
+     * @param previousEvent The event as it was last read from the Vault. Calendars
+     *        that address events by line number use it to find the item again when
+     *        the line number has gone stale.
      */
-    abstract deleteEvent(location: EventPathLocation): Promise<void>;
+    abstract deleteEvent(
+        location: EventPathLocation,
+        previousEvent?: OFCEvent
+    ): Promise<void>;
 
     /**
      * Modify an event on disk.
@@ -56,10 +62,13 @@ export abstract class EditableCalendar extends Calendar {
      * @param updateCacheWithLocation This callback updates the cache with the new location
      *        of the event. In order to avoid race conditions with file I/O, make sure this
      *        is called before any files are changed on disk.
+     * @param previousEvent The event as it was last read from the Vault, used by
+     *        calendars that address events by line number to relocate the item.
      */
     abstract modifyEvent(
         location: EventPathLocation,
         newEvent: OFCEvent,
-        updateCacheWithLocation: (loc: EventLocation) => void
+        updateCacheWithLocation: (loc: EventLocation) => void,
+        previousEvent?: OFCEvent
     ): Promise<void>;
 }

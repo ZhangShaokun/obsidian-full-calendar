@@ -440,6 +440,7 @@ describe("editable calendars", () => {
             expect(calendar.deleteEvent.mock.calls.length).toBe(1);
             expect(calendar.deleteEvent.mock.calls[0]).toEqual([
                 pathResult(event[1]),
+                event[0],
             ]);
 
             assertCacheContentCounts(cache, {

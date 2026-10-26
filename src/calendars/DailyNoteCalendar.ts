@@ -1,12 +1,5 @@
 import moment from "moment";
-import {
-    TFile,
-    CachedMetadata,
-    HeadingCache,
-    ListItemCache,
-    Loc,
-    Pos,
-} from "obsidian";
+import { TFile, CachedMetadata, ListItemCache, Loc, Pos } from "obsidian";
 import {
     appHasDailyNotesPluginLoaded,
     createDailyNote,
@@ -207,6 +200,185 @@ const isBlank = (line: string | undefined): boolean =>
     line !== undefined && line.trim() === "";
 
 /**
+ * Message shown when the item a cached event points at can no longer be
+ * identified in the note. We refuse to guess, because guessing means writing
+ * over somebody else's task.
+ */
+const STALE_LOCATION_ERROR =
+    "The daily note changed since the event was loaded; reopen the calendar.";
+
+const headingLineRegex = /^(#{1,6})\s+(.+)$/;
+
+const headingLevelOf = (line: string | undefined): number | null => {
+    const match = line?.match(headingLineRegex);
+    return match ? match[1].length : null;
+};
+
+const headingTextOf = (line: string | undefined): string | null => {
+    const match = line?.match(headingLineRegex);
+    if (!match) {
+        return null;
+    }
+    // Strip the optional closing hashes of an ATX heading.
+    return match[2]
+        .trim()
+        .replace(/\s*#+$/, "")
+        .trim();
+};
+
+const isListItem = (line: string | undefined): boolean =>
+    line !== undefined && listRegex.test(line);
+
+/**
+ * Title of a list item, ignoring the bullet, checkbox and inline attributes.
+ */
+const titleFromListItem = (line: string): string =>
+    line.replace(listRegex, "").replace(fieldRegex, "").trim();
+
+/**
+ * Find the first heading in the document whose text matches exactly.
+ */
+const findHeadingLine = (
+    lines: string[],
+    headingText: string
+): number | null => {
+    for (let i = 0; i < lines.length; i++) {
+        if (headingTextOf(lines[i]) === headingText) {
+            return i;
+        }
+    }
+    return null;
+};
+
+/**
+ * Line range of the body of a heading: everything between the heading itself
+ * and the next heading of the same or a higher level.
+ */
+const getHeadingSectionRange = (
+    lines: string[],
+    headingLine: number
+): { start: number; end: number } => {
+    const level = headingLevelOf(lines[headingLine]) ?? 6;
+    let end = lines.length;
+    for (let i = headingLine + 1; i < lines.length; i++) {
+        const nextLevel = headingLevelOf(lines[i]);
+        if (nextLevel !== null && nextLevel <= level) {
+            end = i;
+            break;
+        }
+    }
+    return { start: headingLine + 1, end };
+};
+
+/**
+ * Figure out which line of the note an event lives on right now.
+ *
+ * The line number cached alongside an event goes stale whenever another event
+ * in the same note is added or removed, so it is only trusted when it can be
+ * confirmed against the item that is expected there. Otherwise the item is
+ * looked up by title, then by elimination when the heading only holds a single
+ * item. If none of that identifies exactly one line, `null` is returned and the
+ * caller errors out instead of writing to a line that may belong to another
+ * task.
+ */
+const resolveItemLine = (
+    lines: string[],
+    headingLine: number,
+    cachedLineNumber: number,
+    expectedTitle?: string
+): number | null => {
+    const { start, end } = getHeadingSectionRange(lines, headingLine);
+    const itemLines: number[] = [];
+    for (let i = start; i < end; i++) {
+        if (isListItem(lines[i])) {
+            itemLines.push(i);
+        }
+    }
+
+    if (itemLines.length === 0) {
+        return null;
+    }
+
+    if (expectedTitle !== undefined && expectedTitle !== "") {
+        const matches = itemLines.filter(
+            (i) => titleFromListItem(lines[i]) === expectedTitle
+        );
+        if (matches.length > 0) {
+            return matches.includes(cachedLineNumber)
+                ? cachedLineNumber
+                : matches[0];
+        }
+        // Nothing under the heading carries the expected title: fall through and
+        // only accept an unambiguous answer.
+    }
+
+    if (itemLines.length === 1) {
+        return itemLines[0];
+    }
+
+    if (itemLines.includes(cachedLineNumber) && expectedTitle === undefined) {
+        return cachedLineNumber;
+    }
+
+    return null;
+};
+
+/**
+ * Enforce the layout of a daily note:
+ * - runs of blank lines collapse into a single blank line,
+ * - every heading is surrounded by exactly one blank line,
+ * - the file keeps its single trailing newline.
+ *
+ * Idempotent: running it twice yields the same document.
+ */
+export function normalizeHeadingSpacing(lines: string[]): string[] {
+    const endsWithNewline =
+        lines.length > 0 && isBlank(lines[lines.length - 1]);
+    const body = endsWithNewline ? lines.slice(0, -1) : lines;
+
+    const result: string[] = [];
+    for (const line of body) {
+        if (isBlank(line)) {
+            // Drop leading blank lines and collapse consecutive ones.
+            if (result.length > 0 && !isBlank(result[result.length - 1])) {
+                result.push("");
+            }
+            continue;
+        }
+        if (headingLevelOf(line) !== null) {
+            if (result.length > 0 && !isBlank(result[result.length - 1])) {
+                result.push("");
+            }
+            result.push(line, "");
+            continue;
+        }
+        result.push(line);
+    }
+
+    while (result.length > 0 && isBlank(result[result.length - 1])) {
+        result.pop();
+    }
+    if (endsWithNewline) {
+        result.push("");
+    }
+    return result;
+}
+
+/**
+ * Collapsing blank lines can eat the final newline of a document; put it back so
+ * writes stay minimal diffs.
+ */
+const preserveTrailingNewline = (
+    lines: string[],
+    endsWithNewline: boolean
+): string[] => {
+    if (endsWithNewline && !isBlank(lines[lines.length - 1])) {
+        lines.push("");
+    }
+    return lines;
+};
+
+/**
  * Splice lines into place, keeping exactly one blank line between the new
  * content and whatever came before it. Returns the line number of the first
  * inserted line.
@@ -225,34 +397,21 @@ const insertWithBlankLine = (
 };
 
 /**
- * Add a list item to a given heading.
- * If the heading is undefined, then append the heading to the end of the file.
+ * Append a heading to the end of the document, separated from existing content
+ * by a blank line.
  */
-// TODO: refactor this to not do the weird props thing
-type AddToHeadingProps = {
-    heading: HeadingCache | undefined;
-    item: OFCEvent;
-    headingText: string;
-};
-const addToHeading = (
-    page: string,
-    { heading, item, headingText }: AddToHeadingProps
-): { page: string; lineNumber: number } => {
-    const lines = page.split("\n");
+const appendHeading = (lines: string[], headingText: string): number =>
+    insertWithBlankLine(lines, lines.length, [`## ${headingText}`]);
 
-    const listItem = makeListItem(item);
-
-    let headingLine: number;
-    if (heading) {
-        headingLine = heading.position.start.line;
-    } else {
-        headingLine = insertWithBlankLine(lines, lines.length, [
-            `## ${headingText}`,
-        ]);
-    }
-
-    // New items go at the top of the list under the heading. The heading and
-    // its first item are always separated by a single blank line.
+/**
+ * Insert a list item at the top of the list under a heading. The heading and its
+ * first item are always separated by a single blank line.
+ */
+const insertItemUnderHeading = (
+    lines: string[],
+    headingLine: number,
+    listItem: string
+): number => {
     let blankLinesUnderHeading = 0;
     while (isBlank(lines[headingLine + 1 + blankLinesUnderHeading])) {
         blankLinesUnderHeading += 1;
@@ -262,9 +421,55 @@ const addToHeading = (
     }
 
     const index = headingLine + 1 + Math.min(blankLinesUnderHeading, 1);
-    const lineNumber = insertWithBlankLine(lines, index, [listItem]);
+    return insertWithBlankLine(lines, index, [listItem]);
+};
 
-    return { page: lines.join("\n"), lineNumber };
+type AddToHeadingProps = {
+    headingLine: number | undefined;
+    item: OFCEvent;
+    headingText: string;
+};
+
+/**
+ * Add a list item to a given heading.
+ * If the heading does not exist in the note, it is appended to the end of the
+ * file first. The heading's line number is only used as a hint: it is verified
+ * against the heading text so that a stale number can never insert the item
+ * into the wrong section.
+ */
+const addToHeading = (
+    page: string,
+    { headingLine, item, headingText }: AddToHeadingProps
+): { page: string; lineNumber: number } => {
+    const endsWithNewline = page.endsWith("\n");
+    const lines = page.split("\n");
+    const listItem = makeListItem(item);
+
+    let heading =
+        headingLine !== undefined &&
+        headingTextOf(lines[headingLine]) === headingText
+            ? headingLine
+            : findHeadingLine(lines, headingText);
+
+    if (heading === null) {
+        heading = appendHeading(lines, headingText);
+    }
+
+    insertItemUnderHeading(lines, heading, listItem);
+
+    const normalized = normalizeHeadingSpacing(
+        preserveTrailingNewline(lines, endsWithNewline)
+    );
+    const newHeadingLine = findHeadingLine(normalized, headingText);
+    if (newHeadingLine === null) {
+        throw new Error(
+            `Could not find heading "${headingText}" after inserting an event.`
+        );
+    }
+
+    // New items are the first entry under their heading, which normalization
+    // always separates from the heading by exactly one blank line.
+    return { page: normalized.join("\n"), lineNumber: newHeadingLine + 2 };
 };
 
 export default class DailyNoteCalendar extends EditableCalendar {
@@ -285,7 +490,7 @@ export default class DailyNoteCalendar extends EditableCalendar {
         return this.heading;
     }
     get name(): string {
-        return `Daily note under "${this.heading}"`;
+        return `${this.heading} in daily note`;
     }
     get directory(): string {
         const { folder } = getDailyNoteSettings();
@@ -345,7 +550,7 @@ export default class DailyNoteCalendar extends EditableCalendar {
         );
         let lineNumber = await this.app.rewrite(file, (contents) => {
             const { page, lineNumber } = addToHeading(contents, {
-                heading: headingInfo,
+                headingLine: headingInfo?.position.start.line,
                 item: event,
                 headingText: this.heading,
             });
@@ -368,19 +573,66 @@ export default class DailyNoteCalendar extends EditableCalendar {
         return { file, lineNumber };
     }
 
-    async deleteEvent(loc: EventPathLocation): Promise<void> {
+    /**
+     * Find the line of the note that currently holds an item of this calendar.
+     *
+     * Line numbers stored with an event go stale as soon as another item in the
+     * same note is added or removed, so the cached number is only a hint.
+     * Throws instead of guessing when the item cannot be identified, so that a
+     * stale cache can never make us overwrite a different task.
+     */
+    private locateItemLine(
+        lines: string[],
+        file: TFile,
+        cachedLineNumber: number,
+        expectedTitle?: string
+    ): number {
+        const headingLine = findHeadingLine(lines, this.heading);
+        if (headingLine === null) {
+            throw new Error(
+                `Could not find heading "${this.heading}" in ${file.path}.`
+            );
+        }
+        const itemLine = resolveItemLine(
+            lines,
+            headingLine,
+            cachedLineNumber,
+            expectedTitle
+        );
+        if (itemLine === null) {
+            throw new Error(STALE_LOCATION_ERROR);
+        }
+        if (itemLine !== cachedLineNumber) {
+            console.warn(
+                `Daily note line number ${cachedLineNumber} was stale for heading "${this.heading}"; using line ${itemLine} instead.`
+            );
+        }
+        return itemLine;
+    }
+
+    async deleteEvent(
+        loc: EventPathLocation,
+        previousEvent?: OFCEvent
+    ): Promise<void> {
         const { file, lineNumber } = this.getConcreteLocation(loc);
-        this.app.rewrite(file, (contents) => {
-            let lines = contents.split("\n");
-            lines.splice(lineNumber, 1);
-            return lines.join("\n");
+        await this.app.rewrite(file, (contents) => {
+            const lines = contents.split("\n");
+            const itemLine = this.locateItemLine(
+                lines,
+                file,
+                lineNumber,
+                previousEvent?.title
+            );
+            lines.splice(itemLine, 1);
+            return normalizeHeadingSpacing(lines).join("\n");
         });
     }
 
     async modifyEvent(
         loc: EventPathLocation,
         newEvent: OFCEvent,
-        updateCacheWithLocation: (loc: EventLocation) => void
+        updateCacheWithLocation: (loc: EventLocation) => void,
+        previousEvent?: OFCEvent
     ): Promise<void> {
         console.debug("modified daily note event");
         if (newEvent.type !== "single" && newEvent.type !== undefined) {
@@ -402,6 +654,9 @@ export default class DailyNoteCalendar extends EditableCalendar {
                 `Could not get date from file at path ${file.path}`
             );
         }
+        // The cached line number may point at a different item; the title the
+        // event had on disk is what identifies it.
+        const expectedTitle = previousEvent?.title ?? newEvent.title;
         if (newEvent.date !== oldDate) {
             // Event needs to be moved to a new file.
             console.debug("daily note event moving to a new file.");
@@ -423,11 +678,17 @@ export default class DailyNoteCalendar extends EditableCalendar {
             await this.app.rewrite(file, async (oldFileContents) => {
                 // Open the old file and remove the event.
                 let lines = oldFileContents.split("\n");
-                lines.splice(lineNumber, 1);
+                const itemLine = this.locateItemLine(
+                    lines,
+                    file,
+                    lineNumber,
+                    expectedTitle
+                );
+                lines.splice(itemLine, 1);
                 await this.app.rewrite(newFile, (newFileContents) => {
                     // Before writing that change back to disk, open the new file and add the event.
                     const { page, lineNumber } = addToHeading(newFileContents, {
-                        heading: headingInfo,
+                        headingLine: headingInfo?.position.start.line,
                         item: newEvent,
                         headingText: this.heading,
                     });
@@ -436,27 +697,91 @@ export default class DailyNoteCalendar extends EditableCalendar {
                     updateCacheWithLocation({ file: newFile, lineNumber });
                     return page;
                 });
-                return lines.join("\n");
+                return normalizeHeadingSpacing(lines).join("\n");
             });
         } else {
             console.debug("daily note event staying in same file.");
-            updateCacheWithLocation({ file, lineNumber });
             await this.app.rewrite(file, (contents) => {
                 const lines = contents.split("\n");
-                const newLine = modifyListItem(lines[lineNumber], newEvent);
+                const itemLine = this.locateItemLine(
+                    lines,
+                    file,
+                    lineNumber,
+                    expectedTitle
+                );
+                const newLine = modifyListItem(lines[itemLine], newEvent);
                 if (!newLine) {
                     throw new Error("Did not successfully update line.");
                 }
-                lines[lineNumber] = newLine;
-                return lines.join("\n");
+                lines[itemLine] = newLine;
+                // Call the callback before returning so that the cache holds the
+                // refreshed location before the file is written.
+                updateCacheWithLocation({ file, lineNumber: itemLine });
+                return normalizeHeadingSpacing(lines).join("\n");
             });
         }
     }
 
-    move(
+    /**
+     * Move an event from this calendar's heading to another heading of the same
+     * daily note, keeping the item verbatim (formatting, checkbox state and
+     * inline attributes) so nothing but its section changes.
+     */
+    async move(
         from: EventPathLocation,
-        to: EditableCalendar
-    ): Promise<EventLocation> {
-        throw new Error("Method not implemented.");
+        to: EditableCalendar,
+        updateCacheWithLocation: (loc: EventLocation) => void,
+        previousEvent?: OFCEvent
+    ): Promise<void> {
+        if (!(to instanceof DailyNoteCalendar)) {
+            throw new Error(
+                `Events from a daily note can only be moved to another heading of a daily note, not to a calendar of type ${to.type}.`
+            );
+        }
+        const { file, lineNumber } = this.getConcreteLocation(from);
+
+        if (to.heading === this.heading) {
+            // Already under this heading; nothing to write.
+            updateCacheWithLocation({ file, lineNumber });
+            return;
+        }
+
+        const targetHeading = to.heading;
+        await this.app.rewrite(file, (contents) => {
+            const endsWithNewline = contents.endsWith("\n");
+            const lines = contents.split("\n");
+            const itemLine = this.locateItemLine(
+                lines,
+                file,
+                lineNumber,
+                previousEvent?.title
+            );
+
+            // Take the raw line so the item keeps its exact formatting.
+            const [item] = lines.splice(itemLine, 1);
+
+            let targetHeadingLine = findHeadingLine(lines, targetHeading);
+            if (targetHeadingLine === null) {
+                targetHeadingLine = appendHeading(lines, targetHeading);
+            }
+            insertItemUnderHeading(lines, targetHeadingLine, item);
+
+            const normalized = normalizeHeadingSpacing(
+                preserveTrailingNewline(lines, endsWithNewline)
+            );
+            const newHeadingLine = findHeadingLine(normalized, targetHeading);
+            if (newHeadingLine === null) {
+                throw new Error(
+                    `Could not find heading "${targetHeading}" after moving the event.`
+                );
+            }
+
+            // The moved item is the first entry under its new heading.
+            updateCacheWithLocation({
+                file,
+                lineNumber: newHeadingLine + 2,
+            });
+            return normalized.join("\n");
+        });
     }
 }

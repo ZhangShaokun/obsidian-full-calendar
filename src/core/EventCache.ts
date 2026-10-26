@@ -4,9 +4,10 @@ import equal from "deep-equal";
 import { Calendar } from "../calendars/Calendar";
 import { EditableCalendar } from "../calendars/EditableCalendar";
 import EventStore, { StoredEvent } from "./EventStore";
-import { CalendarInfo, OFCEvent, validateEvent } from "../types";
+import { CalendarInfo, EventLocation, OFCEvent, validateEvent } from "../types";
 import RemoteCalendar from "../calendars/RemoteCalendar";
 import FullNoteCalendar from "../calendars/FullNoteCalendar";
+import DailyNoteCalendar from "../calendars/DailyNoteCalendar";
 
 export type CalendarInitializerMap = Record<
     CalendarInfo["type"],
@@ -323,8 +324,9 @@ export default class EventCache {
      */
     async deleteEvent(eventId: string): Promise<void> {
         const { calendar, location } = this.getInfoForEditableEvent(eventId);
+        const previousEvent = this.store.getEventById(eventId) ?? undefined;
         this.store.delete(eventId);
-        await calendar.deleteEvent(location);
+        await calendar.deleteEvent(location, previousEvent);
         this.updateViews([eventId], []);
     }
 
@@ -340,6 +342,7 @@ export default class EventCache {
     ): Promise<boolean> {
         const { calendar, location: oldLocation } =
             this.getInfoForEditableEvent(eventId);
+        const previousEvent = this.store.getEventById(eventId) ?? undefined;
         const { path, lineNumber } = oldLocation;
         console.debug("updating event with ID", eventId);
 
@@ -354,7 +357,8 @@ export default class EventCache {
                     id: eventId,
                     event: newEvent,
                 });
-            }
+            },
+            previousEvent
         );
 
         this.updateViews(
@@ -409,20 +413,13 @@ export default class EventCache {
             throw new Error(`Source calendar ${newCalendarId} does not exist.`);
         }
 
-        // TODO: Support moving around events between all sorts of editable calendars.
-        if (
-            !(
-                oldCalendar instanceof FullNoteCalendar &&
-                newCalendar instanceof FullNoteCalendar &&
-                location
-            )
-        ) {
+        if (!location) {
             throw new Error(
-                `Both calendars must be Full Note Calendars to move events between them.`
+                `Event ${eventId} does not have a location to move from.`
             );
         }
 
-        await oldCalendar.move(location, newCalendar, (newLocation) => {
+        const updateCacheWithLocation = (newLocation: EventLocation) => {
             this.store.delete(eventId);
             this.store.add({
                 calendar: newCalendar,
@@ -430,7 +427,38 @@ export default class EventCache {
                 id: eventId,
                 event,
             });
-        });
+        };
+
+        // TODO: Support moving around events between all sorts of editable calendars.
+        if (
+            oldCalendar instanceof FullNoteCalendar &&
+            newCalendar instanceof FullNoteCalendar
+        ) {
+            await oldCalendar.move(
+                location,
+                newCalendar,
+                updateCacheWithLocation
+            );
+        } else if (
+            oldCalendar instanceof DailyNoteCalendar &&
+            newCalendar instanceof DailyNoteCalendar
+        ) {
+            await oldCalendar.move(
+                location,
+                newCalendar,
+                updateCacheWithLocation,
+                event
+            );
+        } else {
+            throw new Error(
+                `Cannot move events from a ${oldCalendar.type} calendar to a ${newCalendar.type} calendar.`
+            );
+        }
+
+        this.updateViews(
+            [eventId],
+            [{ id: eventId, calendarId: newCalendar.id, event }]
+        );
     }
 
     ///
